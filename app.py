@@ -1,9 +1,15 @@
 import os
 import json
+import time
 import threading
+from collections import defaultdict
+
 import anthropic
-from flask import Flask, request
+from flask import Flask, request, jsonify
+from flask_cors import cross_origin
 from dotenv import load_dotenv
+
+from prompts.web_prompt import WEBSITE_SYSTEM_PROMPT
 
 # ── DORMANT VERTICAL IMPORTS (kept for future use) ───────────────
 # from agent.parser import parse_request
@@ -326,6 +332,84 @@ def health():
         "service": "Zeli Customer Service MVP",
         "clients": list(CLIENTS.keys())
     }, 200
+
+
+# ── WEBSITE CHAT ──────────────────────────────────────────────────
+
+_WEB_CHAT_ROLES = {"user", "assistant"}
+_WEB_CHAT_RATE_LIMIT = 20
+_WEB_CHAT_RATE_WINDOW = 60
+_web_chat_rate_buckets = defaultdict(list)
+_WEB_CHAT_FALLBACK = "Se me fue la señal un momento. ¿Me lo repites?"
+
+
+def _client_ip() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _web_chat_rate_limited(ip: str) -> bool:
+    now = time.time()
+    window_start = now - _WEB_CHAT_RATE_WINDOW
+    recent = [t for t in _web_chat_rate_buckets[ip] if t > window_start]
+    if len(recent) >= _WEB_CHAT_RATE_LIMIT:
+        _web_chat_rate_buckets[ip] = recent
+        return True
+    recent.append(now)
+    _web_chat_rate_buckets[ip] = recent
+    return False
+
+
+def _normalize_web_chat_messages(raw_messages):
+    if not isinstance(raw_messages, list) or not raw_messages:
+        return None
+
+    cleaned = []
+    for msg in raw_messages:
+        if not isinstance(msg, dict):
+            return None
+        role = msg.get("role")
+        content = msg.get("content")
+        if role not in _WEB_CHAT_ROLES or not isinstance(content, str) or not content.strip():
+            return None
+        cleaned.append({"role": role, "content": content[:2000]})
+
+    return cleaned[-20:]
+
+
+@app.route("/web-chat", methods=["POST"])
+@cross_origin(origins=["https://zeli.lat", "https://www.zeli.lat"])
+def web_chat():
+    if _web_chat_rate_limited(_client_ip()):
+        return jsonify({"reply": _WEB_CHAT_FALLBACK}), 200
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    messages = _normalize_web_chat_messages(data.get("messages"))
+    if messages is None:
+        return jsonify({"error": "Invalid messages"}), 400
+
+    try:
+        claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        response = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            system=WEBSITE_SYSTEM_PROMPT,
+            messages=messages,
+        )
+        reply = "".join(
+            block.text for block in response.content if block.type == "text"
+        )
+        if not reply.strip():
+            raise ValueError("Empty model response")
+        return jsonify({"reply": reply}), 200
+    except Exception as e:
+        print(f"❌ web-chat error: {e}")
+        return jsonify({"reply": _WEB_CHAT_FALLBACK}), 200
 
 
 if __name__ == "__main__":
