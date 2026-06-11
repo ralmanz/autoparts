@@ -5,11 +5,17 @@ import threading
 from collections import defaultdict
 
 import anthropic
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import cross_origin
 from dotenv import load_dotenv
 
 from prompts.web_prompt import WEBSITE_SYSTEM_PROMPT
+from utils.conversation_store import (
+    get_all_conversations,
+    get_conversation,
+    log_message,
+    update_metadata,
+)
 
 # ── DORMANT VERTICAL IMPORTS (kept for future use) ───────────────
 # from agent.parser import parse_request
@@ -46,10 +52,25 @@ def send_whatsapp(to: str, message: str) -> str | None:
         data = res.json()
         msg_id = data.get("messages", [{}])[0].get("id")
         print(f"📤 Sent to {to}: {message[:60]}...")
+        _log_conv_message(to, "outbound", message)
         return msg_id
     except Exception as e:
         print(f"❌ send_whatsapp error: {e}")
         return None
+
+
+def _owner_digits() -> str:
+    return os.getenv("YOUR_PERSONAL_WHATSAPP", "").replace("whatsapp:", "").replace("+", "").strip()
+
+
+def _log_conv_message(number: str, direction: str, body: str) -> None:
+    try:
+        digits = number.replace("whatsapp:", "").replace("+", "").strip()
+        if digits == _owner_digits():
+            return
+        log_message(digits, direction, body)
+    except Exception as e:
+        print(f"⚠️ conversation log failed: {e}")
 
 
 # ── CLIENT REGISTRY ───────────────────────────────────────────────
@@ -289,8 +310,15 @@ def webhook():
 
         print(f"\n📨 [{phone_number_id}] From {incoming_number}: {incoming_message}")
 
+        owner = _owner_digits()
+        if incoming_number != owner:
+            try:
+                log_message(incoming_number, "inbound", incoming_message)
+                update_metadata(incoming_number, vertical="demo")
+            except Exception as e:
+                print(f"⚠️ conversation log failed: {e}")
+
         # 1. OWNER REPLY → forward to prospect in live mode
-        owner = os.getenv("YOUR_PERSONAL_WHATSAPP", "").replace("+", "")
         if incoming_number == owner:
             # Check if this is a reply to an escalation notification
             # (reply forwarding via message context — handled by Meta thread)
@@ -332,6 +360,34 @@ def health():
         "service": "Zeli Customer Service MVP",
         "clients": list(CLIENTS.keys())
     }, 200
+
+
+# ── DASHBOARD ─────────────────────────────────────────────────────
+
+@app.route("/")
+def hub():
+    return send_from_directory("static", "hub.html")
+
+
+@app.route("/conversations")
+def conversations_page():
+    return send_from_directory("static", "conversations.html")
+
+
+@app.route("/api/conversations", methods=["GET"])
+def api_conversations():
+    password = request.args.get("password") or request.headers.get("X-Dashboard-Password")
+    if password != os.getenv("DASHBOARD_PASSWORD"):
+        return jsonify({"error": "unauthorized"}), 401
+
+    number = request.args.get("number")
+    if number:
+        convo = get_conversation(number)
+        if convo:
+            return jsonify({number: convo}), 200
+        return jsonify({"error": "not found"}), 404
+
+    return jsonify(get_all_conversations(max_age_hours=24)), 200
 
 
 # ── WEBSITE CHAT ──────────────────────────────────────────────────
