@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import threading
 from collections import defaultdict
 
 import anthropic
@@ -33,13 +32,22 @@ app = Flask(__name__)
 # Carried forward from auto parts vertical — core utility
 import requests as http_requests
 
+def _normalize_wa_number(number: str) -> str:
+    return number.replace("whatsapp:", "").replace("+", "").replace(" ", "").strip()
+
+
 def send_whatsapp(to: str, message: str) -> str | None:
     token = os.getenv("META_ACCESS_TOKEN")
     phone_number_id = os.getenv("META_PHONE_NUMBER_ID")
+    if not token or not phone_number_id:
+        print("❌ send_whatsapp: META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not set")
+        return None
+
+    to_digits = _normalize_wa_number(to)
     url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
     payload = {
         "messaging_product": "whatsapp",
-        "to": to,
+        "to": to_digits,
         "type": "text",
         "text": {"body": message}
     }
@@ -48,11 +56,17 @@ def send_whatsapp(to: str, message: str) -> str | None:
         "Content-Type": "application/json"
     }
     try:
-        res = http_requests.post(url, json=payload, headers=headers)
+        res = http_requests.post(url, json=payload, headers=headers, timeout=30)
         data = res.json()
+        if not res.ok:
+            print(f"❌ send_whatsapp API error ({res.status_code}): {data}")
+            return None
         msg_id = data.get("messages", [{}])[0].get("id")
-        print(f"📤 Sent to {to}: {message[:60]}...")
-        _log_conv_message(to, "outbound", message)
+        if not msg_id:
+            print(f"❌ send_whatsapp: no message id in response: {data}")
+            return None
+        print(f"📤 Sent to {to_digits}: {message[:60]}...")
+        _log_conv_message(to_digits, "outbound", message)
         return msg_id
     except Exception as e:
         print(f"❌ send_whatsapp error: {e}")
@@ -60,12 +74,12 @@ def send_whatsapp(to: str, message: str) -> str | None:
 
 
 def _owner_digits() -> str:
-    return os.getenv("YOUR_PERSONAL_WHATSAPP", "").replace("whatsapp:", "").replace("+", "").strip()
+    return _normalize_wa_number(os.getenv("YOUR_PERSONAL_WHATSAPP", ""))
 
 
 def _log_conv_message(number: str, direction: str, body: str) -> None:
     try:
-        digits = number.replace("whatsapp:", "").replace("+", "").strip()
+        digits = _normalize_wa_number(number)
         if digits == _owner_digits():
             return
         log_message(digits, direction, body)
@@ -73,18 +87,14 @@ def _log_conv_message(number: str, direction: str, body: str) -> None:
         print(f"⚠️ conversation log failed: {e}")
 
 
-# ── CLIENT REGISTRY ───────────────────────────────────────────────
-# Maps Meta Phone Number ID → client config.
-# Zeli's own number runs the demo/sales bot.
-# Add real clients below as they onboard.
-
-CLIENTS = {
-    os.getenv("META_PHONE_NUMBER_ID"): {
+def _get_client(phone_number_id: str) -> dict | None:
+    if phone_number_id != os.getenv("META_PHONE_NUMBER_ID"):
+        return None
+    return {
         "name": "Zeli",
         "mode": "demo",
         "escalation_number": os.getenv("YOUR_PERSONAL_WHATSAPP"),
     }
-}
 
 WELCOME_MESSAGE = """Hola, gracias por escribir. Soy Zeli.
 
@@ -103,20 +113,23 @@ live_mode_numbers = set()         # prospects already handed off — bot stays s
 # ── CORE MESSAGE HANDLER ──────────────────────────────────────────
 
 def process_message(phone_number_id: str, incoming_number: str, incoming_message: str):
-    client = CLIENTS.get(phone_number_id)
+    client = _get_client(phone_number_id)
     if not client:
         print(f"⚠️ No client config for phone_number_id: {phone_number_id}")
         return
 
-    send_whatsapp(incoming_number, WELCOME_MESSAGE)
-    _escalate(client, incoming_number, incoming_message, reason="lead")
+    prospect = _normalize_wa_number(incoming_number)
+    live_mode_numbers.add(prospect)
+
+    send_whatsapp(prospect, WELCOME_MESSAGE)
+    _escalate(client, prospect, incoming_message, reason="lead")
 
 
 def _escalate(client: dict, incoming_number: str, incoming_message: str, reason: str):
     """Notify owner and enter live mode so the founder can reply directly."""
     escalation_number = client.get("escalation_number")
     if not escalation_number:
-        print(f"⚠️ No escalation number configured for {client['name']}")
+        print(f"⚠️ YOUR_PERSONAL_WHATSAPP not set — live mode active but owner won't be notified")
         return
 
     msg_sid = send_whatsapp(
@@ -129,8 +142,9 @@ def _escalate(client: dict, incoming_number: str, incoming_message: str, reason:
 
     if msg_sid:
         escalation_message_map[msg_sid] = incoming_number
-        live_mode_numbers.add(incoming_number)
         print(f"📋 Live mode: {msg_sid} → {incoming_number} (reason: {reason})")
+    else:
+        print(f"⚠️ Owner notification failed for {incoming_number} — live mode still active")
 
 
 # ── WEBHOOK ───────────────────────────────────────────────────────
@@ -173,15 +187,16 @@ def webhook():
         print(f"\n📨 [{phone_number_id}] From {incoming_number}: {incoming_message}")
 
         owner = _owner_digits()
-        if incoming_number != owner:
+        prospect = _normalize_wa_number(incoming_number)
+        if prospect != owner:
             try:
-                log_message(incoming_number, "inbound", incoming_message)
-                update_metadata(incoming_number, vertical="demo")
+                log_message(prospect, "inbound", incoming_message)
+                update_metadata(prospect, vertical="demo")
             except Exception as e:
                 print(f"⚠️ conversation log failed: {e}")
 
         # 1. OWNER REPLY → forward to prospect in live mode
-        if incoming_number == owner:
+        if prospect == owner:
             # Check if this is a reply to an escalation notification
             # (reply forwarding via message context — handled by Meta thread)
             context = msg.get("context", {})
@@ -193,23 +208,20 @@ def webhook():
             return "ok", 200
 
         # 2. LIVE MODE → bot stays silent; forward new messages to owner
-        if incoming_number in live_mode_numbers:
+        if prospect in live_mode_numbers:
             owner_number = os.getenv("YOUR_PERSONAL_WHATSAPP")
             if owner_number:
-                send_whatsapp(
+                msg_sid = send_whatsapp(
                     owner_number,
-                    f"💬 *{incoming_number}*\n{incoming_message}",
+                    f"💬 *{prospect}*\n{incoming_message}",
                 )
-            print(f"🔕 Live mode active for {incoming_number} — forwarded to owner")
+                if msg_sid:
+                    escalation_message_map[msg_sid] = prospect
+            print(f"🔕 Live mode active for {prospect} — forwarded to owner")
             return "ok", 200
 
-        # 3. ROUTE TO CLIENT BOT
-        thread = threading.Thread(
-            target=process_message,
-            args=(phone_number_id, incoming_number, incoming_message)
-        )
-        thread.daemon = True
-        thread.start()
+        # 3. NEW LEAD → welcome + notify owner (sync so live mode is set before return)
+        process_message(phone_number_id, prospect, incoming_message)
 
     except Exception as e:
         print(f"❌ Webhook error: {e}")
@@ -226,7 +238,7 @@ def health():
     return {
         "status": "running",
         "service": "Zeli Customer Service MVP",
-        "clients": list(CLIENTS.keys())
+        "clients": [os.getenv("META_PHONE_NUMBER_ID")]
     }, 200
 
 
