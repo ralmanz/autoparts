@@ -98,9 +98,7 @@ def _get_client(phone_number_id: str) -> dict | None:
 
 WELCOME_MESSAGE = """Hola, gracias por escribir. Soy Zeli.
 
-Zeli Technologies crea asistentes con inteligencia artificial para el sitio web de tu negocio: responden preguntas de tus clientes 24/7 y te conectan contigo cuando hace falta.
-
-Importante: todavía no implementamos bots de WhatsApp. Lo que desplegamos hoy es el asistente en la web personalizada de cada cliente.
+Zeli Technologies crea asistentes con inteligencia artificial para el sitio web de tu negocio: responden preguntas de tus clientes 24/7, conocen tu catálogo y servicios, y te conectan contigo cuando hace falta.
 
 En un momento te escribe alguien del equipo para ayudarte personalmente."""
 
