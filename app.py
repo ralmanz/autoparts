@@ -265,7 +265,7 @@ def api_conversations():
             return jsonify({number: convo}), 200
         return jsonify({"error": "not found"}), 404
 
-    return jsonify(get_all_conversations(max_age_hours=24)), 200
+    return jsonify(get_all_conversations(max_age_hours=168)), 200
 
 
 # ── WEBSITE CHAT ──────────────────────────────────────────────────
@@ -327,6 +327,9 @@ def web_chat():
     if messages is None:
         return jsonify({"error": "Invalid messages"}), 400
 
+    session_id = f"web:{_client_ip()}"
+    latest_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+
     try:
         claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         response = claude.messages.create(
@@ -340,10 +343,23 @@ def web_chat():
         )
         if not reply.strip():
             raise ValueError("Empty model response")
-        return jsonify({"reply": reply}), 200
     except Exception as e:
         print(f"❌ web-chat error: {e}")
-        return jsonify({"reply": _WEB_CHAT_FALLBACK}), 200
+        reply = _WEB_CHAT_FALLBACK
+
+    if latest_user:
+        try:
+            log_message(session_id, "inbound", latest_user["content"])
+            log_message(session_id, "outbound", reply)
+            update_metadata(
+                session_id,
+                vertical="website",
+                customer_name=f"Web · {_client_ip()}",
+            )
+        except Exception as e:
+            print(f"⚠️ web-chat log failed: {e}")
+
+    return jsonify({"reply": reply}), 200
 
 
 if __name__ == "__main__":
