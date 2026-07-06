@@ -275,6 +275,10 @@ _WEB_CHAT_RATE_LIMIT = 20
 _WEB_CHAT_RATE_WINDOW = 60
 _web_chat_rate_buckets = defaultdict(list)
 _WEB_CHAT_FALLBACK = "Se me fue la señal un momento. ¿Me lo repites?"
+_VOICE_MODE_SUFFIX = (
+    "\n\nEsta respuesta se leerá en voz alta. Máximo 50 palabras. "
+    "Una sola idea por respuesta, tono conversacional, sin listas ni formato."
+)
 
 
 def _client_ip() -> str:
@@ -327,6 +331,11 @@ def web_chat():
     if messages is None:
         return jsonify({"error": "Invalid messages"}), 400
 
+    mode = data.get("mode")
+    system_prompt = WEBSITE_SYSTEM_PROMPT
+    if mode == "voice":
+        system_prompt = WEBSITE_SYSTEM_PROMPT + _VOICE_MODE_SUFFIX
+
     session_id = f"web:{_client_ip()}"
     latest_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
 
@@ -335,7 +344,7 @@ def web_chat():
         response = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1000,
-            system=WEBSITE_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
         )
         reply = "".join(
