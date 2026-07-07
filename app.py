@@ -322,7 +322,7 @@ def _normalize_web_chat_messages(raw_messages):
 
 _TTS_CACHE_MAX = 100
 _tts_cache = OrderedDict()
-_TTS_RATE_LIMIT = 10
+_TTS_RATE_LIMIT = 40
 _TTS_RATE_WINDOW = 3600
 _tts_rate_buckets = defaultdict(list)
 
