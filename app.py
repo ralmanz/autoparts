@@ -358,7 +358,7 @@ def _tts_rate_limited(ip: str) -> bool:
 
 
 @app.route("/tts", methods=["POST"])
-@cross_origin(origins=["https://zeli.lat"])
+@cross_origin(origins=["https://zeli.lat", "https://www.zeli.lat"])
 def tts():
     data = request.get_json(silent=True)
     if not data or "text" not in data or not isinstance(data.get("text"), str):
