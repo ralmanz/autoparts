@@ -1,10 +1,11 @@
 import os
 import json
 import time
-from collections import defaultdict
+import base64
+from collections import defaultdict, OrderedDict
 
 import anthropic
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import cross_origin
 from dotenv import load_dotenv
 
@@ -315,6 +316,117 @@ def _normalize_web_chat_messages(raw_messages):
         cleaned.append({"role": role, "content": content[:2000]})
 
     return cleaned[-20:]
+
+
+# ── TEXT TO SPEECH ────────────────────────────────────────────────
+
+_TTS_CACHE_MAX = 100
+_tts_cache = OrderedDict()
+_TTS_RATE_LIMIT = 10
+_TTS_RATE_WINDOW = 3600
+_tts_rate_buckets = defaultdict(list)
+
+
+def _tts_cache_key(text: str) -> str:
+    return base64.b64encode(text.strip().encode()).decode()
+
+
+def _tts_cache_get(key: str) -> bytes | None:
+    if key not in _tts_cache:
+        return None
+    _tts_cache.move_to_end(key)
+    return _tts_cache[key]
+
+
+def _tts_cache_set(key: str, value: bytes) -> None:
+    _tts_cache[key] = value
+    _tts_cache.move_to_end(key)
+    while len(_tts_cache) > _TTS_CACHE_MAX:
+        _tts_cache.popitem(last=False)
+
+
+def _tts_rate_limited(ip: str) -> bool:
+    now = time.time()
+    window_start = now - _TTS_RATE_WINDOW
+    recent = [t for t in _tts_rate_buckets[ip] if t > window_start]
+    if len(recent) >= _TTS_RATE_LIMIT:
+        _tts_rate_buckets[ip] = recent
+        return True
+    recent.append(now)
+    _tts_rate_buckets[ip] = recent
+    return False
+
+
+@app.route("/tts", methods=["POST"])
+@cross_origin(origins=["https://zeli.lat"])
+def tts():
+    data = request.get_json(silent=True)
+    if not data or "text" not in data or not isinstance(data.get("text"), str):
+        return jsonify({"error": "text must be a string"}), 400
+
+    text = data["text"]
+    if len(text) > 600:
+        return jsonify({"error": "text too long"}), 400
+    if not text.strip():
+        return jsonify({"error": "text must be a string"}), 400
+
+    cache_key = _tts_cache_key(text)
+    cached = _tts_cache_get(cache_key)
+    if cached is not None:
+        return Response(
+            cached,
+            mimetype="audio/mpeg",
+            headers={
+                "X-Cache": "HIT",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+
+    ip = _client_ip()
+    if _tts_rate_limited(ip):
+        return jsonify({"error": "rate limit exceeded"}), 429
+
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not voice_id or not api_key:
+        print("❌ TTS: ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID not set")
+        return jsonify({"error": "TTS upstream error"}), 502
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    payload = {
+        "text": text.strip(),
+        "model_id": "eleven_flash_v2_5",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.3,
+            "use_speaker_boost": True,
+        },
+    }
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+
+    try:
+        res = http_requests.post(url, json=payload, headers=headers, timeout=30)
+        if not res.ok:
+            print(f"❌ ElevenLabs TTS error ({res.status_code}): {res.text}")
+            return jsonify({"error": "TTS upstream error"}), 502
+        audio = res.content
+        _tts_cache_set(cache_key, audio)
+        return Response(
+            audio,
+            mimetype="audio/mpeg",
+            headers={
+                "X-Cache": "MISS",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    except Exception as e:
+        print(f"❌ TTS fetch error: {e}")
+        return jsonify({"error": "TTS upstream error"}), 502
 
 
 @app.route("/web-chat", methods=["POST"])
