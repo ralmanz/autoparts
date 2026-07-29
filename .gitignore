@@ -6,3 +6,5 @@ google_credentials.json
 .DS_Store
 *.pdf
 data/conversation_store.json
+worker/node_modules/
+worker/.wrangler/

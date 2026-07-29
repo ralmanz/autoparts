@@ -1,0 +1,15 @@
+name = "zeli-whatsapp"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# Create KV first, then paste the id here:
+#   npx wrangler kv namespace create ESCALATIONS
+[[kv_namespaces]]
+binding = "ESCALATIONS"
+id = "830adc822e054d1a9b9a88b2ea14a94d"
+
+# Set secrets before deploy:
+#   npx wrangler secret put META_ACCESS_TOKEN
+#   npx wrangler secret put META_PHONE_NUMBER_ID
+#   npx wrangler secret put META_VERIFY_TOKEN
+#   npx wrangler secret put YOUR_PERSONAL_WHATSAPP

@@ -37,9 +37,9 @@ def _normalize_wa_number(number: str) -> str:
     return number.replace("whatsapp:", "").replace("+", "").replace(" ", "").strip()
 
 
-def send_whatsapp(to: str, message: str) -> str | None:
+def send_whatsapp(to: str, message: str, phone_number_id: str | None = None) -> str | None:
     token = os.getenv("META_ACCESS_TOKEN")
-    phone_number_id = os.getenv("META_PHONE_NUMBER_ID")
+    phone_number_id = phone_number_id or os.getenv("META_PHONE_NUMBER_ID")
     if not token or not phone_number_id:
         print("❌ send_whatsapp: META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not set")
         return None
@@ -88,14 +88,30 @@ def _log_conv_message(number: str, direction: str, body: str) -> None:
         print(f"⚠️ conversation log failed: {e}")
 
 
+AUTO_REPLY_MESSAGE = (
+    "Te comunicamos con uno de nuestros agentes. "
+    "Pronto atenderemos tu solicitud."
+)
+
+# Additional WhatsApp lines keyed by Meta phone_number_id (not the public +507 number).
+CLIENTS: dict[str, dict] = {}
+
+
 def _get_client(phone_number_id: str) -> dict | None:
-    if phone_number_id != os.getenv("META_PHONE_NUMBER_ID"):
-        return None
-    return {
-        "name": "Zeli",
-        "mode": "demo",
-        "escalation_number": os.getenv("YOUR_PERSONAL_WHATSAPP"),
-    }
+    meta_id = os.getenv("META_PHONE_NUMBER_ID")
+    if phone_number_id == meta_id:
+        return {
+            "name": "Zeli",
+            "mode": "auto_reply",
+            "reply_message": AUTO_REPLY_MESSAGE,
+            "escalation_number": os.getenv("YOUR_PERSONAL_WHATSAPP"),
+        }
+    if phone_number_id in CLIENTS:
+        client = dict(CLIENTS[phone_number_id])
+        client.setdefault("reply_message", AUTO_REPLY_MESSAGE)
+        client["escalation_number"] = os.getenv("YOUR_PERSONAL_WHATSAPP")
+        return client
+    return None
 
 WELCOME_MESSAGE = """Hola, gracias por escribir. Soy Zeli.
 
@@ -106,6 +122,7 @@ En un momento te escribe alguien del equipo para ayudarte personalmente."""
 # ── STATE ─────────────────────────────────────────────────────────
 # Carried forward pattern from auto parts escalation flow
 escalation_message_map = {}       # msg_sid → prospect number (for owner reply forwarding)
+escalation_phone_map = {}         # msg_sid → phone_number_id used for that thread
 live_mode_numbers = set()         # prospects already handed off — bot stays silent
 
 
@@ -118,13 +135,29 @@ def process_message(phone_number_id: str, incoming_number: str, incoming_message
         return
 
     prospect = _normalize_wa_number(incoming_number)
+
+    if client.get("mode") == "auto_reply":
+        send_whatsapp(
+            prospect,
+            client["reply_message"],
+            phone_number_id=phone_number_id,
+        )
+        _escalate(client, prospect, incoming_message, reason="auto_reply", phone_number_id=phone_number_id)
+        return
+
     live_mode_numbers.add(prospect)
 
-    send_whatsapp(prospect, WELCOME_MESSAGE)
-    _escalate(client, prospect, incoming_message, reason="lead")
+    send_whatsapp(prospect, WELCOME_MESSAGE, phone_number_id=phone_number_id)
+    _escalate(client, prospect, incoming_message, reason="lead", phone_number_id=phone_number_id)
 
 
-def _escalate(client: dict, incoming_number: str, incoming_message: str, reason: str):
+def _escalate(
+    client: dict,
+    incoming_number: str,
+    incoming_message: str,
+    reason: str,
+    phone_number_id: str | None = None,
+):
     """Notify owner and enter live mode so the founder can reply directly."""
     escalation_number = client.get("escalation_number")
     if not escalation_number:
@@ -141,12 +174,16 @@ def _escalate(client: dict, incoming_number: str, incoming_message: str, reason:
 
     if msg_sid:
         escalation_message_map[msg_sid] = incoming_number
+        if phone_number_id:
+            escalation_phone_map[msg_sid] = phone_number_id
         print(f"📋 Live mode: {msg_sid} → {incoming_number} (reason: {reason})")
     else:
         print(f"⚠️ Owner notification failed for {incoming_number} — live mode still active")
 
 
 # ── WEBHOOK ───────────────────────────────────────────────────────
+# WhatsApp (50764221918) is handled by worker/ on Cloudflare.
+# Meta callback URL should point to the Worker /webhook, not this Flask app.
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -185,6 +222,11 @@ def webhook():
 
         print(f"\n📨 [{phone_number_id}] From {incoming_number}: {incoming_message}")
 
+        client = _get_client(phone_number_id)
+        if not client:
+            print(f"⚠️ Unhandled phone_number_id: {phone_number_id}")
+            return "ok", 200
+
         owner = _owner_digits()
         prospect = _normalize_wa_number(incoming_number)
         if prospect != owner:
@@ -202,11 +244,21 @@ def webhook():
             replied_to_id = context.get("id")
             if replied_to_id and replied_to_id in escalation_message_map:
                 prospect_number = escalation_message_map[replied_to_id]
-                send_whatsapp(prospect_number, incoming_message)
+                reply_phone_id = escalation_phone_map.get(replied_to_id)
+                send_whatsapp(
+                    prospect_number,
+                    incoming_message,
+                    phone_number_id=reply_phone_id,
+                )
                 print(f"📤 Forwarded owner reply to {prospect_number}")
             return "ok", 200
 
-        # 2. LIVE MODE → bot stays silent; forward new messages to owner
+        # 2. AUTO-REPLY BOT → same message on every request
+        if client.get("mode") == "auto_reply":
+            process_message(phone_number_id, prospect, incoming_message)
+            return "ok", 200
+
+        # 3. LIVE MODE → bot stays silent; forward new messages to owner
         if prospect in live_mode_numbers:
             owner_number = os.getenv("YOUR_PERSONAL_WHATSAPP")
             if owner_number:
@@ -219,7 +271,7 @@ def webhook():
             print(f"🔕 Live mode active for {prospect} — forwarded to owner")
             return "ok", 200
 
-        # 3. NEW LEAD → welcome + notify owner (sync so live mode is set before return)
+        # 4. NEW LEAD → welcome + notify owner (sync so live mode is set before return)
         process_message(phone_number_id, prospect, incoming_message)
 
     except Exception as e:
@@ -237,7 +289,7 @@ def health():
     return {
         "status": "running",
         "service": "Zeli Customer Service MVP",
-        "clients": [os.getenv("META_PHONE_NUMBER_ID")]
+        "clients": [os.getenv("META_PHONE_NUMBER_ID")] + list(CLIENTS.keys()),
     }, 200
 
 
