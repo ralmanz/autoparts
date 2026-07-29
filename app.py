@@ -182,8 +182,8 @@ def _escalate(
 
 
 # ── WEBHOOK ───────────────────────────────────────────────────────
-# WhatsApp (50764221918) is handled by worker/ on Cloudflare.
-# Meta callback URL should point to the Worker /webhook, not this Flask app.
+# WhatsApp (50764221918) → Cloudflare Worker /webhook (worker/)
+# /web-chat, /tts, /api/conversations, dashboard → same Worker
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -322,6 +322,7 @@ def api_conversations():
 
 
 # ── WEBSITE CHAT ──────────────────────────────────────────────────
+# Served by Cloudflare Worker (worker/) — kept here as reference only.
 
 _WEB_CHAT_ROLES = {"user", "assistant"}
 _WEB_CHAT_RATE_LIMIT = 20
