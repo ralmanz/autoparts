@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import base64
 from collections import defaultdict, OrderedDict
@@ -251,6 +252,24 @@ def webhook():
                     phone_number_id=reply_phone_id,
                 )
                 print(f"📤 Forwarded owner reply to {prospect_number}")
+            else:
+                # Check for @<number> <message> format to initiate a conversation
+                at_match = re.match(r"^@(\d{8,15})\s+(.+)", incoming_message, re.DOTALL)
+                if at_match:
+                    target_number = at_match.group(1)
+                    message_body = at_match.group(2)
+                    msg_sid = send_whatsapp(
+                        target_number,
+                        message_body,
+                        phone_number_id=phone_number_id,
+                    )
+                    if msg_sid:
+                        escalation_message_map[msg_sid] = target_number
+                        if phone_number_id:
+                            escalation_phone_map[msg_sid] = phone_number_id
+                    live_mode_numbers.add(target_number)
+                    send_whatsapp(owner, f"Mensaje enviado a {target_number}")
+                    print(f"📤 Owner-initiated message to {target_number}")
             return "ok", 200
 
         # 2. AUTO-REPLY BOT → same message on every request
