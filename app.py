@@ -75,6 +75,47 @@ def send_whatsapp(to: str, message: str, phone_number_id: str | None = None) -> 
         return None
 
 
+def send_whatsapp_template(to: str, template_name: str, language: str = "es",
+                           phone_number_id: str | None = None) -> str | None:
+    token = os.getenv("META_ACCESS_TOKEN")
+    phone_number_id = phone_number_id or os.getenv("META_PHONE_NUMBER_ID")
+    if not token or not phone_number_id:
+        print("❌ send_whatsapp_template: META_ACCESS_TOKEN or META_PHONE_NUMBER_ID not set")
+        return None
+
+    to_digits = _normalize_wa_number(to)
+    url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_digits,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language},
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        res = http_requests.post(url, json=payload, headers=headers, timeout=30)
+        data = res.json()
+        if not res.ok:
+            print(f"❌ send_whatsapp_template API error ({res.status_code}): {data}")
+            return None
+        msg_id = data.get("messages", [{}])[0].get("id")
+        if not msg_id:
+            print(f"❌ send_whatsapp_template: no message id in response: {data}")
+            return None
+        print(f"📤 Sent template '{template_name}' to {to_digits}")
+        _log_conv_message(to_digits, "outbound", f"[template: {template_name}]")
+        return msg_id
+    except Exception as e:
+        print(f"❌ send_whatsapp_template error: {e}")
+        return None
+
+
 def _owner_digits() -> str:
     return _normalize_wa_number(os.getenv("YOUR_PERSONAL_WHATSAPP", ""))
 
@@ -258,6 +299,13 @@ def webhook():
                 if at_match:
                     target_number = at_match.group(1)
                     message_body = at_match.group(2)
+                    # Send approved template first to open the conversation window
+                    send_whatsapp_template(
+                        target_number,
+                        "greetings",
+                        phone_number_id=phone_number_id,
+                    )
+                    # Then send the owner's custom message
                     msg_sid = send_whatsapp(
                         target_number,
                         message_body,
